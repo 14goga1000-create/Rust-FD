@@ -22,13 +22,14 @@ pub fn pick_folder_via_explorer(current_dir: &str) -> Option<String> {
 
 pub fn open_in_windows_explorer(folder: &str, file_path: &PathBuf) {
     let part_path = get_part_path(file_path);
+    // explorer /select, требует кавычки, иначе пути с пробелами («My Files») обрезаются
     if file_path.exists() {
         let _ = Command::new("explorer")
-            .arg(format!("/select,{}", file_path.display()))
+            .arg(format!("/select,\"{}\"", file_path.display()))
             .spawn();
     } else if part_path.exists() {
         let _ = Command::new("explorer")
-            .arg(format!("/select,{}", part_path.display()))
+            .arg(format!("/select,\"{}\"", part_path.display()))
             .spawn();
     } else {
         let _ = fs::create_dir_all(folder);

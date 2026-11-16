@@ -343,6 +343,8 @@ pub fn spawn_smart_download(
             .timeout_connect(Duration::from_millis(5000))
             .build();
 
+        // Стримим ответ в память порциями, чтобы пауза/отмена работали уже во время передачи,
+        // а не только после того, как файл целиком окажется в RAM.
         let full_bytes: Vec<u8> = match agent
             .get(&meta.normalized_url)
             .set("User-Agent", "RustDM/0.1.0-MegaPatch")
@@ -350,7 +352,39 @@ pub fn spawn_smart_download(
         {
             Ok(resp) => {
                 let mut buf = Vec::new();
-                let _ = resp.into_reader().read_to_end(&mut buf);
+                let mut reader = resp.into_reader();
+                let mut chunk = [0u8; 64 * 1024];
+
+                loop {
+                    if *is_cancelled.lock().unwrap() {
+                        let _ = fs::remove_file(&part_path);
+                        return;
+                    }
+                    if *is_paused.lock().unwrap() {
+                        *status.lock().unwrap() = "⏸ На паузе (соединение удерживается)".to_string();
+                        *bar_overlay.lock().unwrap() = Some("⏸ Пауза".to_string());
+                        thread::sleep(Duration::from_millis(120));
+                        continue;
+                    }
+
+                    match reader.read(&mut chunk) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            buf.extend_from_slice(&chunk[..n]);
+                            *bar_overlay.lock().unwrap() =
+                                Some(format!("⚡ Приём потока: {}", format_bytes(buf.len() as u64)));
+                        }
+                        Err(_) => break,
+                    }
+                }
+
+                if buf.is_empty() {
+                    *conn_failed.lock().unwrap() = true;
+                    *status.lock().unwrap() = "✖ Сервер закрыл соединение, файл не получен".to_string();
+                    *bar_overlay.lock().unwrap() = Some("✖ Обрыв соединения".to_string());
+                    let _ = fs::remove_file(&part_path);
+                    return;
+                }
                 buf
             }
             Err(_) => {
@@ -361,6 +395,9 @@ pub fn spawn_smart_download(
                 return;
             }
         };
+
+        // Поток принят полностью — снова отдаём полоску под живой прогресс 50/50
+        *bar_overlay.lock().unwrap() = None;
 
         let total_len = full_bytes.len();
         let mid = total_len / 2;

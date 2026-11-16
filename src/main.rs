@@ -52,6 +52,10 @@ struct DownloadManagerApp {
 
     modal_probe_state: Arc<Mutex<ModalProbeState>>,
     modal_probe_ticket: Arc<Mutex<usize>>,
+
+    /// Редактируемое поле «папка по умолчанию» из окна настроек.
+    /// Нельзя брать временную строку из default_save_dir — правки терялись бы каждый кадр.
+    settings_dir_edit: String,
 }
 
 impl Default for DownloadManagerApp {
@@ -72,6 +76,7 @@ impl Default for DownloadManagerApp {
             global_cpu_load: cpu_monitor,
             net_settings,
             modal_save_dir: base_dir.display().to_string(),
+            settings_dir_edit: base_dir.display().to_string(),
             default_save_dir: base_dir,
             snail_mode: false,
             show_settings_window: false,
@@ -154,6 +159,19 @@ impl DownloadManagerApp {
     fn sync_disk_and_snail_mode(&mut self) {
         self.downloads.retain(|item| {
             let finished = *item.is_finished.lock().unwrap();
+            let failed = *item.connection_failed.lock().unwrap();
+            let cancelled = *item.is_cancelled.lock().unwrap();
+            let p1 = *item.progress_p1.lock().unwrap();
+            let p2 = *item.progress_p2.lock().unwrap();
+            let started = (p1 + p2) > 0.0;
+
+            // Дисковый радар не должен трогать загрузки, которые ещё проверяют сервер
+            // (файл .part создаётся только после probe), а также упавшие/отменённые —
+            // иначе карточка с ошибкой исчезнет раньше, чем пользователь её увидит.
+            if failed || cancelled || (!finished && !started) {
+                return true;
+            }
+
             fs_watcher::exists_on_disk(&item.full_path, finished)
         });
 
@@ -593,7 +611,11 @@ impl eframe::App for DownloadManagerApp {
                             if let Some(pos) = self.downloads.iter().position(|d| d.id == target_id) {
                                 let removed = self.downloads.remove(pos);
                                 *removed.is_cancelled.lock().unwrap() = true;
-                                fs_watcher::purge_partial_files(&removed.full_path);
+                                // Чистим только недокачанный кэш: готовый файл пользователя не трогаем.
+                                let finished = *removed.is_finished.lock().unwrap();
+                                if !finished {
+                                    fs_watcher::purge_partial_files(&removed.full_path);
+                                }
                             }
                         }
                     });
@@ -859,10 +881,16 @@ impl eframe::App for DownloadManagerApp {
                     ui.add_space(6.0);
                     ui.label(egui::RichText::new("Папка по умолчанию для новых загрузок:").size(12.0).color(TEXT_MUTED));
                     ui.horizontal(|ui| {
-                        let mut dir_str = self.default_save_dir.display().to_string();
-                        ui.add(egui::TextEdit::singleline(&mut dir_str).desired_width(310.0));
+                        if ui
+                            .add(egui::TextEdit::singleline(&mut self.settings_dir_edit).desired_width(310.0))
+                            .changed()
+                            && !self.settings_dir_edit.trim().is_empty()
+                        {
+                            self.default_save_dir = PathBuf::from(self.settings_dir_edit.trim());
+                        }
                         if ui.button("📁 Выбрать...").clicked() {
-                            if let Some(picked) = fs_watcher::pick_folder_via_explorer(&dir_str) {
+                            if let Some(picked) = fs_watcher::pick_folder_via_explorer(&self.settings_dir_edit) {
+                                self.settings_dir_edit = picked.clone();
                                 self.default_save_dir = PathBuf::from(picked);
                             }
                         }
