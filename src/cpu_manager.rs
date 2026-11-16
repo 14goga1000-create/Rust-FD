@@ -1,3 +1,4 @@
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 use sysinfo::System;
@@ -10,6 +11,28 @@ pub struct CoreSelection {
     pub core2_id: usize,
     pub core2_freq: u64,
     pub core2_load: f32,
+}
+
+/// Запускает фоновый мониторинг общей нагрузки процессора для Авто-Приоритета
+pub fn start_cpu_monitor() -> Arc<Mutex<f32>> {
+    let cpu_load = Arc::new(Mutex::new(0.0_f32));
+    let load_clone = Arc::clone(&cpu_load);
+
+    thread::spawn(move || {
+        let mut sys = System::new_all();
+        loop {
+            sys.refresh_cpu();
+            thread::sleep(Duration::from_millis(1500));
+            sys.refresh_cpu();
+
+            let global_load = sys.global_cpu_info().cpu_usage();
+            if let Ok(mut load) = load_clone.lock() {
+                *load = global_load;
+            }
+        }
+    });
+
+    cpu_load
 }
 
 /// Ищет два самых быстрых (P-ядра) и наименее загруженных ядра в системе
